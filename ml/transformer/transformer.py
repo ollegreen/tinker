@@ -15,6 +15,7 @@ from config import (
     dropout,
     seq_length,
     d_feed_forward,
+    num_heads,
 )
 from vocab import vocabulary
 from embedding import InputEmbeddings
@@ -144,24 +145,26 @@ class MultiHeadAttentionBlock(nn.Module):
         self.num_heads = num_heads
         # We need to divide the embedding vector by num_heads, so let's assert that:
         assert d_model & num_heads == 0, "d_model is not divisible by num_heads"
-        self.d_k = d model // num_heads # dk = d_model / num_heads # TODO: what does this mean?
+        self.d_k = d_model // num_heads # dk = d_model / num_heads # TODO: what does this mean?
+
         self.w_q = nn.Linear(d_model, d_model) # this is the W^Q_matrix
         self.w_k = nn.Linear(d_model, d_model) # this is the W^K_matrix
         self.w_v = nn.Linear(d_model, d_model) # this is the W^V_matrix
-        self.w_o = 
-        self.dropout = dropout
+
+        self.w_o = nn.Linear(d_model, d_model) # this is the W^V_matrix
+        logging.info(f"W^Q matrix: {self.w_q}")
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, q, k, v, mask): # mask, if we don't want 
+        query = self.w_q(q) # <- called Q' in the video
+        key =   self.w_k(k) # From (Batch, seq_length, d_model) -> To: (Batch, seq_length, d_model)
+        value = self.w_v(v) # From (Batch, seq_length, d_model) -> To: (Batch, seq_length, d_model)
+
         
 
+        # Now we divide it into smaller matrices to give each matrix to a different head:
+        logging.info("self.w_q(q) -> query output: {query}")
 
 
-
-
-
-
-
-
-
-
-
-
-                 
+attentionblock = MultiHeadAttentionBlock(d_model, num_heads, dropout)
+logging.debug(f"- After attention: {attentionblock(feedforwardblock(layernorm(positional_encoding(input_embedding(input_indices)))))}")
