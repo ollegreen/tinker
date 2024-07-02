@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO,format='%(message)s')
 from hyperparameters import sentence
 
 from config import (
-    d_model,
+    d_model, # size of embedding vector
     vocab_size,
     dropout,
     seq_length,
