@@ -1,170 +1,105 @@
 import torch
 import torch.nn as nn
-import math
 
-torch.set_printoptions(precision=4, sci_mode=False)
-
-import logging
-logging.basicConfig(level=logging.INFO,format='%(message)s')
-
-from hyperparameters import sentence
-
-from config import (
-    d_model, # size of embedding vector
-    vocab_size,
-    dropout,
-    seq_length,
-    d_feed_forward,
-    num_heads,
-)
-from vocab import vocabulary
+from attention import MultiHeadAttentionBlock
+from feed_forward_block import FeedForwardBlock
+from encoder import EncoderBlock, Encoder
+from decoder import DecoderBlock, Decoder
 from embedding import InputEmbeddings
 from positional_encoding import PositionalEncoding
-from layer_norm import LayerNormalization
-from feed_forward_block import FeedForwardBlock
+from projection_layer import ProjectionLayer
+
+import logging
+logging.basicConfig(level=logging.INFO,format="%(message)s")
 
 
 
 
-
-"""
- EMBEDDING LAYER:
-"""
-logging.info(f"Input sentence: {sentence}")
-# logging.info(f'vocab of mate: {vocabulary.get(sentence[6].lower(), vocabulary["[UNK]"])}')
-indices = [vocabulary.get(word.lower(), vocabulary["[UNK]"]) for word in sentence]
-logging.debug(f'indices: {indices}')
-input_indices = torch.tensor(indices, dtype=torch.long)
-logging.debug(f'torch input indices: {input_indices}')
-input_embedding = InputEmbeddings(d_model, vocab_size)
-logging.debug(f'- Input after embedding: {input_embedding(input_indices)}')
-
-
-
-
-
-
-"""
- POSITIONAL ENCODING:
-"""
-logging.debug(f"- seq_length: {seq_length}")
-positional_encoding = PositionalEncoding(d_model, seq_length, dropout)
-logging.debug(f"- Embedding including positional encoding: {positional_encoding(input_embedding(input_indices))}")
-
-
-
-
-
-
-"""
- LAYER NORMALIZATION:
-
-    HELPS WITH:
-    1. Stabilize Training.
-    2. Speeds up convergence -> Helps the model to learn more effectively by
-                                maintaining more consistent gradients during back-propagation.
-    3. Improves generalization -> By ensuring that the activations within the
-                                    network remain in a similar range, the model can
-                                    generalize better to new, unseen data.
-
-    HOW IT WORKS:
-    Takes:
-    ((x - mean) / stdev) * alpha * beta
-
-    ^introduces 2 learnable parameters that allow the normalized values to be scaled and shifted.
-
-    So in this case with the input sentence being ['Your', 'cat', 'is', 'a', 'lovely', 'cat', 'mate'],
-    each of these items would have the mean and stdev being calculated for their vectors.
-
-    You calcualte mean and std individually, then in the batch (let's say 3) you multipy it with
-    alpha and then add beta.
-
-    Alpha / gamma is the same.
-    Beta / bias is the same.
-"""
-layernorm = LayerNormalization()
-logging.debug(f"- After layer normalization: {layernorm(positional_encoding(input_embedding(input_indices)))}")
-
-
-
-
-
-
-"""
-FEED FORWARD LAYER:
-    Two matrices, multiplied by W1 and W2, with ReLu in between these linear layers and biases.
-"""
-feedforwardblock = FeedForwardBlock(d_model, d_feed_forward, dropout)
-logging.debug(f"- After feed forward block: {feedforwardblock(layernorm(positional_encoding(input_embedding(input_indices))))}")
-
-
-
-
-
-
-
-"""
-MULTI-HEAD ATTENTION:
-    The attention is used 3 times (as you can see in the arch graph pic):
-    1. Query
-    2. Key
-    3. Value
-
-    It's a duplication of the input 3 times.
-
-    Where we transform the input (sequence, d_model) and output 3 vectors:
-        Because we are in the encoder: these 3 matrices are exactly the same.
-        It's different later in the decoder. 
-
-        Then we multiply each one by a weight, so that:
-        Q-vector * W^Q_matrix = Q' = Q1, Q2, Q3, Q4 ... etc
-        K-vector * W^K_matrix = K'
-        V-vector * W^v_matrix = V'
-
-        Then we split these matrices into smaller matrices (same number as the number of heads we want):
-            Q' = Q1, Q2, Q3, Q4 ... etc
-            K' = K1, K2, K3, K4 ... etc
-            V' = V1, V2, V3, V4 ... etc
-        
-        ^this split is done so that the Q1 matrix has the same dimension as the embedding dimension (d_model),
-        this gives each head the access to the full sentence, but 
-
-        Then we take these smaller matrices and use the Attention formula:
-        23 min: https://www.youtube.com/watch?v=ISNdQcPhsts&t=340s&ab_channel=UmarJamil
-
-        where we concatinate the heads:
-            MultiHead (Q,K,V) = Concat(head1, ...head_n_heads,) * W°
-
-"""
-
-class MultiHeadAttentionBlock(nn.Module):
-
-    def __init__(self, d_model: int, num_heads: int, dropout: float) -> None:
+class Transformer(nn.Module):
+    def __init__(self, encoder: Encoder,
+                 decoder: Decoder,
+                 src_embedding: InputEmbeddings,
+                 target_embedding: InputEmbeddings,
+                 src_position: PositionalEncoding,
+                 target_position: PositionalEncoding,
+                 projection_layer:ProjectionLayer) -> None:
         super().__init__()
-        self.d_model = d_model
-        self.num_heads = num_heads
-        # We need to divide the embedding vector by num_heads, so let's assert that:
-        assert d_model & num_heads == 0, "d_model is not divisible by num_heads"
-        self.d_k = d_model // num_heads # dk = d_model / num_heads # TODO: what does this mean?
-
-        self.w_q = nn.Linear(d_model, d_model) # this is the W^Q_matrix
-        self.w_k = nn.Linear(d_model, d_model) # this is the W^K_matrix
-        self.w_v = nn.Linear(d_model, d_model) # this is the W^V_matrix
-
-        self.w_o = nn.Linear(d_model, d_model) # this is the W^V_matrix
-        logging.info(f"W^Q matrix: {self.w_q}")
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, q, k, v, mask): # mask, if we don't want 
-        query = self.w_q(q) # <- called Q' in the video
-        key =   self.w_k(k) # From (Batch, seq_length, d_model) -> To: (Batch, seq_length, d_model)
-        value = self.w_v(v) # From (Batch, seq_length, d_model) -> To: (Batch, seq_length, d_model)
-
-        
-
-        # Now we divide it into smaller matrices to give each matrix to a different head:
-        logging.info("self.w_q(q) -> query output: {query}")
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_embedding = src_embedding
+        self.target_embedding = target_embedding
+        self.src_position = src_position
+        self.target_position = target_position
+        self.projection_layer = projection_layer
 
 
-attentionblock = MultiHeadAttentionBlock(d_model, num_heads, dropout)
-logging.debug(f"- After attention: {attentionblock(feedforwardblock(layernorm(positional_encoding(input_embedding(input_indices)))))}")
+    def encode(self, src, src_mask):
+        src = self.src_embedding(src)
+        src = self.src_position(src)
+        return self.encoder(src, src_mask)
+
+    def decode(self, encoder_output, src_mask, target, target_mask):
+        target = self.target_embedding(target)
+        target = self.target_position(target)
+        return self.decoder(target, encoder_output, src_mask, target, target_mask) # <- = forward method of decoder (order of inputs)
+
+    def project(self, input):
+        return self.projection_layer(input)
+
+"""
+BUILD TRANSFORMER - Given a set of parameters and hyperparameters:
+
+"""
+
+def build_transformer(src_vocab_size: int,
+                      target_vocab_size: int,
+                      src_seq_len: int,
+                      target_seq_len: int,
+                      d_model: int,
+                      number_of_blocks: int = 6,
+                      num_heads = 2,
+                      dropout: float = 0.1,
+                      d_ff: int = 2048, # hidden layer of feed-forward
+                      ):
+
+    # create embedding layer: 
+    src_embedding = InputEmbeddings(d_model, src_vocab_size)
+    target_embedding = InputEmbeddings(d_model, target_vocab_size)
+
+    src_pos = PositionalEncoding(d_model, src_seq_len, dropout)
+    # Note: target_pos isn't really needed as they are the same as the src positional encoding, but just for vis/debugging.
+    target_pos = PositionalEncoding(d_model, target_seq_len, dropout)
+
+    # Create encoder blocks
+    encoder_blocks = []
+    for _ in range(number_of_blocks):
+        encoder_self_attention_block = MultiHeadAttentionBlock(d_model, num_heads, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        encoder_block = EncoderBlock(encoder_self_attention_block, feed_forward_block, dropout)
+        encoder_blocks.append(encoder_block)
+
+
+    decoder_blocks = []
+    for _ in range(number_of_blocks):
+        decoder_self_attention_block = MultiHeadAttentionBlock(d_model, num_heads, dropout)
+        decoder_cross_attention_block = MultiHeadAttentionBlock(d_model, num_heads, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        decoder_block = DecoderBlock(decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout)
+        decoder_blocks.append(decoder_block)
+
+    # Create the encoder and decoder
+    encoder = Encoder(nn.ModuleList(encoder_blocks))
+    decoder = Decoder(nn.ModuleList(decoder_blocks))
+
+    # Create the projection layer -> projecting to the target vocabulary:
+    projection_layer = ProjectionLayer(d_model, target_vocab_size)
+
+    # Create the transformer
+    transformer = Transformer(encoder, decoder, src_embedding, target_embedding, src_pos, target_pos, projection_layer)
+
+    # Intitialise the parameters:
+    for parameter in transformer.parameters():
+        if parameter.dim() > 1:
+            nn.init.xavier_uniform_(parameter)
+
+    return transformer
